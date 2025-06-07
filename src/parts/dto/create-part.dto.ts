@@ -1,10 +1,25 @@
-import { ApiProperty } from "@nestjs/swagger";
-import { PartType } from "src/common/common.enums";
+import { IsString, IsEnum, IsArray, ValidateNested, IsOptional, IsInt, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class ConstituentDto {
+  @IsString()
+  partId: string;
+
+  @IsInt()
+  @Min(1)
+  quantity: number;
+}
 
 export class CreatePartDto {
-    @ApiProperty({required: true})
-    name: string;
-    
-    @ApiProperty({required: true, enum: Object.values(PartType) })
-    type: PartType;
+  @IsString()
+  name: string;
+
+  @IsEnum(['RAW', 'ASSEMBLED'])
+  type: 'RAW' | 'ASSEMBLED';
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ConstituentDto)
+  @IsOptional()
+  parts?: ConstituentDto[];
 }
