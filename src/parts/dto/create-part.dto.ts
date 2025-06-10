@@ -1,7 +1,9 @@
-import { IsString, IsEnum, IsArray, ValidateNested, IsOptional, IsInt, Min } from 'class-validator';
+import { IsString, IsEnum, IsArray, ValidateNested, IsOptional, IsInt, Min, IsNotEmpty, ValidateIf, ArrayNotEmpty } from 'class-validator';
 import { Type } from 'class-transformer';
+import { PartType } from 'src/common/common.enums';
 
 export class ConstituentDto {
+  @IsNotEmpty()
   @IsString()
   partId: string;
 
@@ -11,15 +13,15 @@ export class ConstituentDto {
 }
 
 export class CreatePartDto {
-  @IsString()
+  @IsNotEmpty()
   name: string;
 
-  @IsEnum(['RAW', 'ASSEMBLED'])
-  type: 'RAW' | 'ASSEMBLED';
+  @IsEnum(PartType)
+  type: PartType;
 
-  @IsArray()
+  @ValidateIf((o) => o.type === PartType.ASSEMBLED)
+  @ArrayNotEmpty()
   @ValidateNested({ each: true })
   @Type(() => ConstituentDto)
-  @IsOptional()
   parts?: ConstituentDto[];
 }

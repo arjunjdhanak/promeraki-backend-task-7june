@@ -4,56 +4,52 @@ import { Model, ClientSession } from 'mongoose';
 import { Part } from './schemas/part.schema';
 import { CreatePartDto } from './dto/create-part.dto';
 import { AddInventoryDto } from './dto/add-invenotory.dto';
+import { PartType } from 'src/common/common.enums';
 
 @Injectable()
 export class PartsService {
   constructor(@InjectModel(Part.name) private partModel: Model<Part>) {}
 
-  async create(createPartDto: CreatePartDto): Promise<Part> {
-    const { name, type, parts } = createPartDto;
+  private readonly creationValidation = {
+    [PartType.RAW]: async (dto: CreatePartDto, id: string) => {
+      return new this.partModel({
+        id,
+        name: dto.name,
+        type: dto.type,
+        quantityInStock: 0,
+      });
+    },
 
-    if (type === 'ASSEMBLED' && (!parts || parts.length === 0)) {
-      throw new BadRequestException('Assembled parts must have constituent parts');
-    }
+    [PartType.ASSEMBLED]: async (dto: CreatePartDto, id: string) => {
+      const parts = dto.parts ?? [];
 
-    if (type === 'ASSEMBLED' && parts) {
+      // Validate existence of all constituent parts
       for (const constituent of parts) {
         const part = await this.partModel.findOne({ id: constituent.partId }).exec();
         if (!part) {
           throw new BadRequestException(`Part with ID ${constituent.partId} does not exist`);
         }
       }
-    }
 
-    const newPartId = `${name.toLowerCase()}-${Date.now()}`;
+      await this.checkCircularDependency(id, parts.map(p => p.partId));
 
-    if (type === 'ASSEMBLED' && parts) {
-      await this.checkCircularDependency(newPartId, parts?.map(p => p.partId));
-    }
+      return new this.partModel({
+        id,
+        name: dto.name,
+        type: dto.type,
+        quantityInStock: 0,
+        constituents: parts.map(p => ({ partId: p.partId, quantity: p.quantity })),
+      });
+    },
+  };
 
-    const part = new this.partModel({
-      id: newPartId,
-      name,
-      type,
-      quantityInStock: 0,
-      constituents: (type === 'ASSEMBLED' && parts) ? parts.map(p => ({ partId: p.partId, quantity: p.quantity })) : undefined,
-    });
-
-    return part.save();
-  }
-
-  async addInventory(partId: string, addInventoryDto: AddInventoryDto): Promise<{ status: string; message?: string }> {
-    const { quantity } = addInventoryDto;
-    const part = await this.partModel.findOne({ id: partId }).exec();
-
-    if (!part) {
-      throw new BadRequestException(`Part with ID ${partId} not found`);
-    }
-
-    if (part.type === 'RAW') {
-      await this.partModel.updateOne({ id: partId }, { $inc: { quantityInStock: quantity } }).exec();
+  private readonly inventoryStrategies = {
+    [PartType.RAW]: async (part: Part, quantity: number) => {
+      await this.partModel.updateOne({ id: part.id }, { $inc: { quantityInStock: quantity } }).exec();
       return { status: 'SUCCESS' };
-    } else {
+    },
+
+    [PartType.ASSEMBLED]: async (part: Part, quantity: number) => {
       const session = await this.partModel.db.startSession();
       try {
         return await session.withTransaction(async () => {
@@ -78,7 +74,7 @@ export class PartsService {
           }
 
           await this.partModel
-            .updateOne({ id: partId }, { $inc: { quantityInStock: quantity } })
+            .updateOne({ id: part.id }, { $inc: { quantityInStock: quantity } })
             .session(session)
             .exec();
 
@@ -87,7 +83,36 @@ export class PartsService {
       } finally {
         session.endSession();
       }
+    },
+  };
+
+  async create(createPartDto: CreatePartDto): Promise<Part> {
+    const { name, type } = createPartDto;
+    const newId = `${name.toLowerCase()}-${Date.now()}`;
+
+    const validated = this.creationValidation[type];
+    if (!validated) {
+      throw new BadRequestException(`Unsupported part type: ${type}`);
     }
+
+    const part = await validated(createPartDto, newId);
+    return part.save();
+  }
+
+  async addInventory(partId: string, addInventoryDto: AddInventoryDto): Promise<{ status: string; message?: string }> {
+    const { quantity } = addInventoryDto;
+    const part = await this.partModel.findOne({ id: partId }).exec();
+
+    if (!part) {
+      throw new BadRequestException(`Part with ID ${partId} not found`);
+    }
+
+    const strategy = this.inventoryStrategies[part.type];
+    if (!strategy) {
+      throw new BadRequestException(`Unsupported inventory operation for type: ${part.type}`);
+    }
+
+    return strategy(part, quantity);
   }
 
   private async checkCircularDependency(partId: string, constituentIds: string[], visited = new Set<string>()): Promise<void> {
@@ -97,9 +122,9 @@ export class PartsService {
     visited.add(partId);
 
     for (const constituentId of constituentIds) {
-      const constituentPart = await this.partModel.findOne({ id: constituentId }).exec();
-      if (constituentPart && constituentPart?.type === 'ASSEMBLED' && constituentPart?.constituents) {
-        await this.checkCircularDependency(partId, constituentPart.constituents.map(c => c.partId), new Set(visited));
+      const part = await this.partModel.findOne({ id: constituentId }).exec();
+      if (part?.type === PartType.ASSEMBLED && part.constituents) {
+        await this.checkCircularDependency(partId, part.constituents.map(c => c.partId), new Set(visited));
       }
     }
   }
